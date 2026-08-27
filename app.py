@@ -211,7 +211,7 @@ def _crtsh(domain: str):
 def _run_scan(q: Query):
     """Generator that performs the scan and yields ('stage', msg) progress events
     as each real step happens, then a final ('done', result_dict)."""
-    domain = q.domain.strip().rstrip(".")
+    domain = q.domain.strip().rstrip(".").lower()   # normalize: some CT APIs are case-sensitive
     if not domain:
         yield ("done", {"error": "domain required"}); return
     ns = q.resolver
