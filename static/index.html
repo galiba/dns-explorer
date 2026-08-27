@@ -124,6 +124,13 @@ function render(d){
     `<span>records <b>${d.rows.length}</b></span>`+
     `<span>scope <b class="internal">${d.counts?d.counts.internal:0} internal</b> / <b class="public">${d.counts?d.counts.public:0} public</b></span>`+
     `<span>method <b>${esc(d.method)}</b></span><span>NS <b>${esc(ns)}</b></span>`;
+  if(d.passive_sources){
+    const ps=Object.entries(d.passive_sources).map(([k,v])=>{
+      const col=v==='err'?'var(--red)':(v>0?'var(--grn)':'var(--mut)');
+      return `${esc(k)}:<b style="color:${col}">${esc(String(v))}</b>`;
+    }).join('  ');
+    m+=`<span>passive sources ${ps}</span>`;
+  }
   const ipHosts={};
   for(const r of d.rows) if(r.type==='A'||r.type==='AAAA'){(ipHosts[r.value] ||= new Set()).add(r.host)}
   const sharedIPs=Object.values(ipHosts).filter(s=>s.size>1).length;

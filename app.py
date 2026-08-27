@@ -5,7 +5,7 @@ nameservers (or a user-supplied internal NS) to dump every record it holds. No
 subdomain wordlist — so wildcard DNS can't manufacture fake hosts. If AXFR is
 refused, fall back to direct record-type queries on the apex.
 """
-import io, ipaddress, secrets
+import io, ipaddress, secrets, time
 from concurrent.futures import ThreadPoolExecutor
 
 import dns.resolver, dns.reversename, dns.query, dns.zone, dns.rdatatype
@@ -142,13 +142,17 @@ def _clean(names, domain: str) -> set:
 
 
 def _src_crtsh(domain: str) -> set:
-    r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15, headers=_UA)
-    if not (r.ok and r.headers.get("content-type", "").startswith("application/json")):
-        return set()
-    out = set()
-    for row in r.json():
-        out |= _clean(row.get("name_value", "").splitlines(), domain)
-    return out
+    # crt.sh frequently 502s / returns HTML under load — retry a couple times
+    for attempt in range(3):
+        r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15, headers=_UA)
+        if r.ok and r.headers.get("content-type", "").startswith("application/json"):
+            out = set()
+            for row in r.json():
+                out |= _clean(row.get("name_value", "").splitlines(), domain)
+            return out
+        if attempt < 2:
+            time.sleep(1.5)
+    return set()
 
 
 def _src_certspotter(domain: str) -> set:
@@ -180,20 +184,28 @@ def _src_hackertarget(domain: str) -> set:
 _PASSIVE_SOURCES = [_src_crtsh, _src_certspotter, _src_certkit, _src_hackertarget]
 
 
-def _crtsh(domain: str) -> list[str]:
+def _crtsh(domain: str):
     """Passive subdomain discovery: query ALL certificate-transparency / public
     sources concurrently and union the results — each source finds names the
-    others miss. One source failing (e.g. crt.sh 502) never drops the rest."""
-    names: set = set()
+    others miss. One source failing (e.g. crt.sh 502) never drops the rest.
+    Returns (sorted_names, per_source_counts) so flaky sources are visible."""
     def run(fn):
-        try:
-            return fn(domain)
-        except Exception:
-            return set()
+        for attempt in range(2):                 # one retry on hard failure
+            try:
+                return fn(domain)
+            except Exception:
+                if attempt == 0:
+                    time.sleep(1.0)
+        return None                              # None = source errored (vs empty)
     with ThreadPoolExecutor(max_workers=len(_PASSIVE_SOURCES)) as ex:
-        for got in ex.map(run, _PASSIVE_SOURCES):
+        results = list(ex.map(run, _PASSIVE_SOURCES))
+    names, counts = set(), {}
+    for fn, got in zip(_PASSIVE_SOURCES, results):
+        label = fn.__name__.replace("_src_", "")
+        counts[label] = "err" if got is None else len(got)
+        if got:
             names |= got
-    return sorted(names)
+    return sorted(names), counts
 
 
 @app.post("/api/scan")
@@ -275,9 +287,10 @@ def scan(q: Query):
                 push(r, "apex", label)
 
     # passive discovery (CT logs), each candidate resolved across all views
-    passive_names = []
+    passive_names, passive_sources = [], {}
     if q.passive:
-        cands = [n for n in _crtsh(domain) if n not in {r["host"] for r in rows}][:400]
+        all_names, passive_sources = _crtsh(domain)
+        cands = [n for n in all_names if n not in {r["host"] for r in rows}][:400]
         passive_names = cands
         jobs = [(h, label, vns) for h in cands for label, vns in views]
         with ThreadPoolExecutor(max_workers=20) as ex:
@@ -299,7 +312,8 @@ def scan(q: Query):
     counts = {"internal": sum(r.get("scope") == "internal" for r in rows),
               "public": sum(r.get("scope") == "public" for r in rows)}
     return {"domain": domain, "resolver": ns or "system", "method": method,
-            "wildcard": wildcard, "counts": counts, "apex": apex, "rows": rows}
+            "wildcard": wildcard, "counts": counts, "passive_sources": passive_sources,
+            "apex": apex, "rows": rows}
 
 
 @app.post("/api/export")
