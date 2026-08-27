@@ -1,0 +1,216 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DNS Explorer</title>
+<style>
+:root{--bg:#0a0e17;--panel:#111826;--line:#1f2b3d;--txt:#c9d4e3;--mut:#6b7c93;--acc:#4f9cf9;--grn:#3ddc84;--red:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+header{padding:22px 28px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:14px}
+h1{margin:0;font-size:20px;letter-spacing:.5px}h1 span{color:var(--acc)}
+.sub{color:var(--mut);font-size:12px}
+form{display:flex;flex-wrap:wrap;gap:10px;padding:20px 28px;border-bottom:1px solid var(--line);align-items:end}
+label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:var(--mut)}
+input[type=text]{background:var(--panel);border:1px solid var(--line);color:var(--txt);padding:8px 10px;border-radius:6px;font:inherit;min-width:220px}
+input:focus{outline:none;border-color:var(--acc)}
+.chk{flex-direction:row;align-items:center;gap:6px;color:var(--txt)}
+button{background:var(--acc);color:#04121f;border:0;padding:9px 18px;border-radius:6px;font:inherit;font-weight:700;cursor:pointer}
+button:disabled{opacity:.5;cursor:wait}
+button.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+#meta{padding:10px 28px;color:var(--mut);font-size:12px;display:none;gap:24px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+#meta b{color:var(--txt)}
+#tabs{display:none;gap:8px;padding:12px 28px 0}
+#tabs button{background:var(--panel);color:var(--mut);border:1px solid var(--line);padding:6px 16px;font-weight:600}
+#tabs button.on{color:var(--acc);border-color:var(--acc)}
+.wrap{overflow:auto;padding:0 28px 40px}
+table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px}
+th{text-align:left;color:var(--mut);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
+td{padding:8px 10px;border-bottom:1px solid #131c2b;vertical-align:top;white-space:pre-line}
+tr:hover td{background:#0e1626}
+.host{color:var(--grn)}.ip{color:var(--acc)}.type{color:var(--mut)}
+.internal{color:#ffb454;font-weight:600}.public{color:var(--grn)}
+.err{color:var(--red);padding:16px 28px}
+.spin{color:var(--acc);padding:16px 28px;display:none}
+/* graph */
+#graph{display:none;padding:14px 28px 60px;overflow:auto}
+.gedge{fill:none;stroke:#2a3a52;stroke-width:1}
+.gn{stroke-width:1.5;rx:4}
+.gn.domain{fill:#2a1616;stroke:#7a3b3b}
+.gn.type{fill:#141c2b;stroke:#5a6b86}
+.gn.host{fill:#0f1c14;stroke:var(--grn)}
+.gn.ip{fill:#0e1830;stroke:var(--acc)}
+.gn.int{fill:#241a08;stroke:#ffb454}
+.gn.val{fill:#151515;stroke:#7a6a3b}
+.gt{font:11px ui-monospace,Menlo,monospace;fill:var(--txt)}
+.gt.domain{fill:#e0a0a0}.gt.host{fill:var(--grn)}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.type{fill:#aab8cc}
+#graph g[data-fk]{cursor:pointer}
+#graph g[data-fk]:hover .gn{stroke-width:2.5;filter:brightness(1.4)}
+#filter{display:none;align-items:center;gap:10px;padding:10px 28px;font-size:12px;color:var(--mut)}
+#filter .chip{background:var(--panel);border:1px solid var(--acc);color:var(--acc);border-radius:14px;padding:3px 10px}
+#filter .x{cursor:pointer;color:var(--red);font-weight:700}
+</style></head><body>
+<header><h1>DNS<span>Explorer</span></h1><span class="sub">zone-transfer (AXFR) &amp; passive discovery · internal NS · graph &amp; xlsx export</span></header>
+<form id="f">
+  <label>Domain<input id="domain" type="text" placeholder="example.com" required></label>
+  <label>Nameserver / internal DNS (optional)<input id="resolver" type="text" placeholder="10.0.0.53 (AXFR target &amp; resolver)"></label>
+  <label class="chk"><input id="passive" type="checkbox" checked> Passive (crt.sh)</label>
+  <label class="chk"><input id="grab" type="checkbox" checked> HTTP banner grab</label>
+  <button id="go" type="submit">Scan</button>
+  <button id="dl" class="ghost" type="button" disabled>Export .xlsx</button>
+  <button id="png" class="ghost" type="button" disabled>Export .png</button>
+</form>
+<div id="meta"></div>
+<div id="tabs"><button id="tabTable" class="on">Table</button><button id="tabGraph">Graph</button></div>
+<div id="filter"></div>
+<div id="spin" class="spin">resolving…</div>
+<div id="err" class="err"></div>
+<div class="wrap"><table id="t" style="display:none">
+<thead><tr><th>Host</th><th>Type</th><th>Value / IP</th><th>Scope</th><th>Reverse DNS</th><th>Netblock Owner</th><th>HTTP Services</th><th>Source</th></tr></thead>
+<tbody></tbody></table></div>
+<div id="graph"></div>
+<script>
+let last=null;
+const $=id=>document.getElementById(id);
+$('f').addEventListener('submit',async e=>{
+  e.preventDefault();
+  $('err').textContent='';$('t').style.display='none';$('meta').style.display='none';$('tabs').style.display='none';
+  $('spin').style.display='block';$('go').disabled=true;$('dl').disabled=true;
+  const body={domain:$('domain').value,resolver:$('resolver').value||null,grab_http:$('grab').checked,passive:$('passive').checked};
+  try{
+    const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(!r.ok||d.error){throw new Error(d.error||'scan failed')}
+    last=d;render(d);
+  }catch(err){$('err').textContent='⚠ '+err.message}
+  finally{$('spin').style.display='none';$('go').disabled=false}
+});
+$('dl').addEventListener('click',async()=>{
+  if(!last)return;
+  const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(last)});
+  const b=await r.blob();const u=URL.createObjectURL(b);
+  const a=document.createElement('a');a.href=u;a.download=last.domain+'-dns.xlsx';a.click();URL.revokeObjectURL(u);
+});
+$('png').addEventListener('click',()=>{
+  if(!last)return;
+  if(!$('graph').dataset.rendered){renderGraph(last);$('graph').dataset.rendered='1'}
+  const svg=$('graph').querySelector('svg'); if(!svg)return;
+  const W=+svg.getAttribute('width'), H=+svg.getAttribute('height'), scale=2;
+  const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)],{type:'image/svg+xml;charset=utf-8'}));
+  const img=new Image();
+  img.onload=()=>{
+    const c=document.createElement('canvas'); c.width=W*scale; c.height=H*scale;
+    const ctx=c.getContext('2d'); ctx.scale(scale,scale); ctx.drawImage(img,0,0);
+    URL.revokeObjectURL(url);
+    c.toBlob(b=>{const u=URL.createObjectURL(b);const a=document.createElement('a');
+      a.href=u;a.download=last.domain+'-dns-graph.png';a.click();URL.revokeObjectURL(u)},'image/png');
+  };
+  img.onerror=()=>{URL.revokeObjectURL(url);$('err').textContent='⚠ PNG export failed'};
+  img.src=url;
+});
+$('tabTable').onclick=()=>showView('table');
+$('tabGraph').onclick=()=>showView('graph');
+function showView(v){
+  const g=v==='graph';
+  $('t').style.display=g?'none':'table';
+  $('graph').style.display=g?'block':'none';
+  $('tabGraph').classList.toggle('on',g);$('tabTable').classList.toggle('on',!g);
+  if(g && !$('graph').dataset.rendered){renderGraph(last);$('graph').dataset.rendered='1'}
+}
+function esc(x){return (x||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}
+function render(d){
+  const ns=(d.apex.NS||[]).map(x=>x.replace(/\.$/,'')).join(', ')||'—';
+  let m=`<span>domain <b>${esc(d.domain)}</b></span><span>resolver <b>${esc(d.resolver)}</b></span>`+
+    `<span>records <b>${d.rows.length}</b></span>`+
+    `<span>scope <b class="internal">${d.counts?d.counts.internal:0} internal</b> / <b class="public">${d.counts?d.counts.public:0} public</b></span>`+
+    `<span>method <b>${esc(d.method)}</b></span><span>NS <b>${esc(ns)}</b></span>`;
+  if(d.wildcard) m+=`<span style="color:var(--red)">⚠ wildcard DNS detected — unlisted names may resolve</span>`;
+  $('meta').innerHTML=m; $('meta').style.display='flex';
+  filter=null; fillTable(); renderChip();
+  $('dl').disabled=false;$('png').disabled=false;
+  $('tabs').style.display='flex';$('graph').dataset.rendered='';$('graph').innerHTML='';
+  showView('table');
+}
+let filter=null;  // {field:'host'|'type'|'value', val}
+function matchFilter(r){return !filter || r[filter.field]===filter.val}
+function fillTable(){
+  const tb=$('t').querySelector('tbody');tb.innerHTML='';
+  for(const row of last.rows){
+    if(!matchFilter(row))continue;
+    const tr=document.createElement('tr');
+    const val=esc(row.value); const isip=row.type==='A'||row.type==='AAAA';
+    tr.innerHTML=`<td class="host">${esc(row.host)}</td><td class="type">${esc(row.type)}</td>`+
+      `<td class="${isip?'ip':''}">${val}</td><td class="${esc(row.scope)}">${esc(row.scope)}</td>`+
+      `<td>${esc(row.reverse)}</td>`+
+      `<td>${esc(row.owner).replace(/\n/g,'<br>')}</td><td>${esc(row.http).replace(/\n/g,'<br>')}</td>`+
+      `<td class="type">${esc(row.source)}</td>`;
+    tb.appendChild(tr);
+  }
+  $('t').style.display='table';
+}
+function renderChip(){
+  const f=$('filter');
+  if(!filter){f.style.display='none';f.innerHTML='';return}
+  const n=last.rows.filter(matchFilter).length;
+  f.innerHTML=`filtering <span class="chip">${esc(filter.field)} = ${esc(filter.val)}</span> `+
+    `<span>${n} record${n===1?'':'s'}</span> <span class="x" id="clr">✕ clear</span>`;
+  f.style.display='flex';
+  $('clr').onclick=()=>{filter=null;fillTable();renderChip()};
+}
+function applyFilter(field,val){
+  filter=(field==='domain')?null:{field,val};
+  fillTable(); renderChip(); showView('table');
+  window.scrollTo({top:$('tabs').offsetTop,behavior:'smooth'});
+}
+$('graph').addEventListener('click',e=>{
+  const g=e.target.closest('g[data-fk]'); if(!g)return;
+  applyFilter(g.dataset.fk,g.dataset.fv);
+});
+// clip label to fit column width (~7px per mono char)
+function clip(s,w){const max=Math.floor((w-14)/7);return s.length>max?s.slice(0,max-1)+'…':s}
+function renderGraph(d){
+  const rows=d.rows; if(!rows.length){$('graph').textContent='no records';return}
+  const rowH=26, colX=[16,250,340,660], colW=[150,60,300,260], NH=20;
+  const types=[...new Set(rows.map(r=>r.type))];
+  let leaf=0; const nodes=[], edges=[], typeNodes=[];
+  for(const t of types){
+    const trows=rows.filter(r=>r.type===t);
+    const hosts=[...new Set(trows.map(r=>r.host))];
+    const hostNodes=[];
+    for(const h of hosts){
+      const vrows=trows.filter(r=>r.host===h);
+      const valNodes=[];
+      for(const vr of vrows){
+        const y=leaf*rowH+30; leaf++;
+        const isip=t==='A'||t==='AAAA';
+        const cls=isip?(vr.scope==='internal'?'int':'ip'):'val';
+        valNodes.push(add(nodes,colX[3],y,colW[3],vr.value,cls));
+      }
+      const hn=add(nodes,colX[2],avg(valNodes),colW[2],h,'host');
+      hostNodes.push(hn); valNodes.forEach(v=>edges.push([hn,v]));
+    }
+    const tn=add(nodes,colX[1],avg(hostNodes),colW[1],t,'type');
+    typeNodes.push(tn); hostNodes.forEach(h=>edges.push([tn,h]));
+  }
+  const dn=add(nodes,colX[0],avg(typeNodes),colW[0],d.domain,'domain');
+  typeNodes.forEach(t=>edges.push([dn,t]));
+  const H=leaf*rowH+50, W=colX[3]+colW[3]+30;
+  let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="monospace">`+
+    `<style>.gedge{fill:none;stroke:#2a3a52}.gn{stroke-width:1.5}`+
+    `.gn.domain{fill:#2a1616;stroke:#7a3b3b}.gn.type{fill:#141c2b;stroke:#5a6b86}`+
+    `.gn.host{fill:#0f1c14;stroke:#3ddc84}.gn.ip{fill:#0e1830;stroke:#4f9cf9}.gn.int{fill:#241a08;stroke:#ffb454}.gn.val{fill:#151515;stroke:#7a6a3b}`+
+    `.gt{font:11px monospace;fill:#c9d4e3}.gt.domain{fill:#e0a0a0}.gt.host{fill:#3ddc84}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.type{fill:#aab8cc}</style>`+
+    `<rect width="${W}" height="${H}" fill="#0a0e17"/>`;
+  for(const[p,c] of edges){
+    const x1=p.x+p.w,y1=p.y+NH/2,x2=c.x,y2=c.y+NH/2,mx=(x1+x2)/2;
+    s+=`<path class="gedge" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`;
+  }
+  const fk={domain:'domain',type:'type',host:'host',ip:'value',int:'value',val:'value'};
+  for(const n of nodes){
+    s+=`<g data-fk="${fk[n.cls]}" data-fv="${esc(n.label).replace(/"/g,'&quot;')}"><title>${esc(n.label)} — click to filter</title>`+
+      `<rect class="gn ${n.cls}" x="${n.x}" y="${n.y}" width="${n.w}" height="${NH}" rx="4"/>`+
+      `<text class="gt ${n.cls}" x="${n.x+7}" y="${n.y+14}">${esc(clip(n.label,n.w))}</text></g>`;
+  }
+  $('graph').innerHTML=s+'</svg>';
+}
+function add(arr,x,y,w,label,cls){const n={x,y,w,label,cls};arr.push(n);return n}
+function avg(ns){return ns.reduce((a,n)=>a+n.y,0)/ns.length}
+</script></body></html>
