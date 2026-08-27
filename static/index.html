@@ -30,6 +30,22 @@ tr:hover td{background:#0e1626}
 .internal{color:#ffb454;font-weight:600}.public{color:var(--grn)}
 .err{color:var(--red);padding:16px 28px}
 .spin{color:var(--acc);padding:16px 28px;display:none}
+/* resolving overlay */
+#overlay{position:fixed;inset:0;z-index:50;display:none;align-items:center;justify-content:center;
+  background:rgba(10,14,23,.55);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px)}
+#overlay.on{display:flex}
+.ov-card{display:flex;flex-direction:column;align-items:center;gap:20px;padding:36px 44px;text-align:center;
+  min-width:340px;max-width:540px;background:rgba(17,24,38,.92);border:1px solid var(--line);
+  border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.5)}
+.spinner{width:46px;height:46px;border:3px solid var(--line);border-top-color:var(--acc);
+  border-radius:50%;animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.ov-title{color:var(--acc);font-size:13px;letter-spacing:.14em;text-transform:uppercase}
+.ov-msg{color:var(--txt);font-size:15px;line-height:1.5;min-height:44px;transition:opacity .2s}
+.ov-sub{color:var(--mut);font-size:12px}.ov-dom{color:var(--grn)}
+.ov-dots{display:flex;gap:6px}
+.ov-dots i{width:6px;height:6px;border-radius:50%;background:var(--line);transition:background .3s}
+.ov-dots i.on{background:var(--acc)}
 /* graph */
 #graph{display:none;padding:14px 28px 60px;overflow:auto}
 .gedge{fill:none;stroke:#2a3a52;stroke-width:1}
@@ -63,8 +79,14 @@ tr:hover td{background:#0e1626}
 <div id="meta"></div>
 <div id="tabs"><button id="tabTable" class="on">Table</button><button id="tabGraph">Graph</button></div>
 <div id="filter"></div>
-<div id="spin" class="spin">resolving…</div>
 <div id="err" class="err"></div>
+<div id="overlay"><div class="ov-card">
+  <div class="spinner"></div>
+  <div class="ov-title">Resolving</div>
+  <div id="ovMsg" class="ov-msg">Starting scan…</div>
+  <div class="ov-dots" id="ovDots"></div>
+  <div class="ov-sub">Mapping <span id="ovDom" class="ov-dom"></span> — a scan usually takes a few seconds</div>
+</div></div>
 <div class="wrap"><table id="t" style="display:none">
 <thead><tr><th>Host</th><th>Type</th><th>Value / IP</th><th>Scope</th><th>View</th><th>Reverse DNS</th><th>Netblock Owner</th><th>HTTP Services</th><th>Source</th></tr></thead>
 <tbody></tbody></table></div>
@@ -75,7 +97,7 @@ const $=id=>document.getElementById(id);
 $('f').addEventListener('submit',async e=>{
   e.preventDefault();
   $('err').textContent='';$('t').style.display='none';$('meta').style.display='none';$('tabs').style.display='none';
-  $('spin').style.display='block';$('go').disabled=true;$('dl').disabled=true;
+  ovStart($('domain').value.trim()||'the domain');$('go').disabled=true;$('dl').disabled=true;$('png').disabled=true;
   const body={domain:$('domain').value,resolver:$('resolver').value||null,grab_http:$('grab').checked,passive:$('passive').checked};
   try{
     const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -83,8 +105,33 @@ $('f').addEventListener('submit',async e=>{
     if(!r.ok||d.error){throw new Error(d.error||'scan failed')}
     last=d;render(d);
   }catch(err){$('err').textContent='⚠ '+err.message}
-  finally{$('spin').style.display='none';$('go').disabled=false}
+  finally{ovStop();$('go').disabled=false}
 });
+// resolving overlay: narrate the real pipeline stages while the request is in flight
+const OV_STEPS=[
+  "Querying the nameservers for the base records — A, AAAA, MX, NS, TXT, SOA.",
+  "Attempting a DNS zone transfer (AXFR) to dump the full zone from the nameservers.",
+  "Checking whether the domain uses wildcard DNS, so bogus names get flagged.",
+  "Searching certificate transparency logs — crt.sh, Cert Spotter, CertKit, HackerTarget.",
+  "Resolving every discovered hostname to its IP address across the resolvers.",
+  "Looking up reverse DNS (PTR) and the ASN / netblock owner for each IP.",
+  "Grabbing HTTP and HTTPS server banners to fingerprint what's running.",
+  "Flagging internal vs public IPs and assembling the results and graph.",
+];
+let ovTimer=null, ovI=0;
+function ovStart(dom){
+  $('ovDom').textContent=dom; ovI=0; $('ovMsg').textContent=OV_STEPS[0];
+  $('ovDots').innerHTML=OV_STEPS.map((_,i)=>`<i class="${i===0?'on':''}"></i>`).join('');
+  $('overlay').classList.add('on');
+  clearInterval(ovTimer);
+  ovTimer=setInterval(()=>{
+    ovI=Math.min(ovI+1,OV_STEPS.length-1);
+    const el=$('ovMsg'); el.style.opacity=0;
+    setTimeout(()=>{el.textContent=OV_STEPS[ovI];el.style.opacity=1;},180);
+    [...$('ovDots').children].forEach((d,i)=>d.classList.toggle('on',i<=ovI));
+  },1700);
+}
+function ovStop(){ clearInterval(ovTimer); ovTimer=null; $('overlay').classList.remove('on'); }
 $('dl').addEventListener('click',async()=>{
   if(!last)return;
   const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(last)});
