@@ -26,6 +26,12 @@ reverse proxy fronting it (e.g. `*.cloudfront.net`, `*.1e100.net`). A **Source**
 column tags each row (AXFR / apex / passive). Wildcard DNS is auto-detected and
 flagged so bogus resolutions are obvious. One-click **.xlsx export**.
 
+**Shared hosting / reverse-proxy fan-in:** identical IPs (and reverse-proxy
+hostnames) are coalesced into a single graph node that every host fans into —
+badged `×N` and highlighted when more than one host shares it — so you can see
+at a glance which IP or CDN front serves multiple hosts. Clicking it filters the
+table to all hosts on that IP; the summary bar reports the shared-IP count.
+
 ## Run
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt

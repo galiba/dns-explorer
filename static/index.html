@@ -41,6 +41,7 @@ tr:hover td{background:#0e1626}
 .gn.int{fill:#241a08;stroke:#ffb454}
 .gn.rev{fill:#1a1226;stroke:#a678d6}
 .gn.val{fill:#151515;stroke:#7a6a3b}
+.gn.shared{stroke-width:3}
 .gt{font:11px ui-monospace,Menlo,monospace;fill:var(--txt)}
 .gt.domain{fill:#e0a0a0}.gt.host{fill:var(--grn)}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.rev{fill:#c8a6ec}.gt.type{fill:#aab8cc}
 #graph g[data-fk]{cursor:pointer}
@@ -123,6 +124,10 @@ function render(d){
     `<span>records <b>${d.rows.length}</b></span>`+
     `<span>scope <b class="internal">${d.counts?d.counts.internal:0} internal</b> / <b class="public">${d.counts?d.counts.public:0} public</b></span>`+
     `<span>method <b>${esc(d.method)}</b></span><span>NS <b>${esc(ns)}</b></span>`;
+  const ipHosts={};
+  for(const r of d.rows) if(r.type==='A'||r.type==='AAAA'){(ipHosts[r.value] ||= new Set()).add(r.host)}
+  const sharedIPs=Object.values(ipHosts).filter(s=>s.size>1).length;
+  if(sharedIPs) m+=`<span>shared IPs <b class="internal">${sharedIPs}</b> (hosting &gt;1 host)</span>`;
   if(d.wildcard) m+=`<span style="color:var(--red)">⚠ wildcard DNS detected — unlisted names may resolve</span>`;
   $('meta').innerHTML=m; $('meta').style.display='flex';
   filter=null; fillTable(); renderChip();
@@ -198,12 +203,38 @@ function renderGraph(d){
   }
   const dn=add(nodes,colX[0],avg(typeNodes),colW[0],d.domain,'domain');
   typeNodes.forEach(t=>edges.push([dn,t]));
+
+  // coalesce duplicate IP / reverse nodes so a shared IP or proxy becomes ONE
+  // node that many hosts fan into (turns the tree into a DAG showing shared hosting)
+  function coalesce(classes){
+    const g={};
+    for(const n of nodes) if(classes.includes(n.cls)) (g[n.label] ||= []).push(n);
+    for(const label in g){
+      const grp=g[label]; if(grp.length<2) continue;
+      const rep=grp[0]; rep.y=avg(grp);
+      const dups=new Set(grp.slice(1));
+      for(const e of edges){ if(dups.has(e[0]))e[0]=rep; if(dups.has(e[1]))e[1]=rep; }
+      for(const dd of dups){ const i=nodes.indexOf(dd); if(i>=0) nodes.splice(i,1); }
+    }
+  }
+  coalesce(['ip','int']);   // shared IPs
+  coalesce(['rev']);        // shared reverse-proxy hostnames
+  // de-dup edges and drop self-loops created by coalescing
+  const eseen=new Set(), edges2=[];
+  for(const[p,c] of edges){ if(p===c)continue; const k=p._id+'>'+c._id; if(eseen.has(k))continue; eseen.add(k); edges2.push([p,c]); }
+  edges.length=0; edges.push(...edges2);
+  // incoming count = how many distinct hosts/IPs point into this node
+  const inc={};
+  for(const[p,c] of edges){ (inc[c._id] ||= new Set()).add(p._id); }
+  for(const n of nodes){ n.count=inc[n._id]?inc[n._id].size:0; }
+
   const H=leaf*rowH+50, W=colX[4]+colW[4]+30;
   let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="monospace">`+
     `<style>.gedge{fill:none;stroke:#2a3a52}.gn{stroke-width:1.5}`+
     `.gn.domain{fill:#2a1616;stroke:#7a3b3b}.gn.type{fill:#141c2b;stroke:#5a6b86}`+
     `.gn.host{fill:#0f1c14;stroke:#3ddc84}.gn.ip{fill:#0e1830;stroke:#4f9cf9}.gn.int{fill:#241a08;stroke:#ffb454}.gn.rev{fill:#1a1226;stroke:#a678d6}.gn.val{fill:#151515;stroke:#7a6a3b}`+
-    `.gt{font:11px monospace;fill:#c9d4e3}.gt.domain{fill:#e0a0a0}.gt.host{fill:#3ddc84}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.rev{fill:#c8a6ec}.gt.type{fill:#aab8cc}</style>`+
+    `.gn.shared{stroke-width:3}`+
+    `.gt{font:11px monospace;fill:#c9d4e3}.gt.domain{fill:#e0a0a0}.gt.host{fill:#3ddc84}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.rev{fill:#c8a6ec}.gt.type{fill:#aab8cc}.gt.count{fill:#ffd479}</style>`+
     `<rect width="${W}" height="${H}" fill="#0a0e17"/>`;
   for(const[p,c] of edges){
     const x1=p.x+p.w,y1=p.y+NH/2,x2=c.x,y2=c.y+NH/2,mx=(x1+x2)/2;
@@ -211,12 +242,19 @@ function renderGraph(d){
   }
   const fk={domain:'domain',type:'type',host:'host',ip:'value',int:'value',val:'value',rev:'reverse'};
   for(const n of nodes){
-    s+=`<g data-fk="${fk[n.cls]}" data-fv="${esc(n.label).replace(/"/g,'&quot;')}"><title>${esc(n.label)} — click to filter</title>`+
-      `<rect class="gn ${n.cls}" x="${n.x}" y="${n.y}" width="${n.w}" height="${NH}" rx="4"/>`+
-      `<text class="gt ${n.cls}" x="${n.x+7}" y="${n.y+14}">${esc(clip(n.label,n.w))}</text></g>`;
+    const shared=n.count>1, badge=shared?`  ×${n.count}`:'';
+    const lw=shared?n.w-34:n.w;   // leave room for the count badge
+    const tip=shared?`${esc(n.label)} — ${n.count} hosts share this — click to filter`
+                    :`${esc(n.label)} — click to filter`;
+    s+=`<g data-fk="${fk[n.cls]}" data-fv="${esc(n.label).replace(/"/g,'&quot;')}"><title>${tip}</title>`+
+      `<rect class="gn ${n.cls}${shared?' shared':''}" x="${n.x}" y="${n.y}" width="${n.w}" height="${NH}" rx="4"/>`+
+      `<text class="gt ${n.cls}" x="${n.x+7}" y="${n.y+14}">${esc(clip(n.label,lw))}</text>`+
+      (shared?`<text class="gt count" x="${n.x+n.w-8}" y="${n.y+14}" text-anchor="end">×${n.count}</text>`:'')+
+      `</g>`;
   }
   $('graph').innerHTML=s+'</svg>';
 }
-function add(arr,x,y,w,label,cls){const n={x,y,w,label,cls};arr.push(n);return n}
+let _nid=0;
+function add(arr,x,y,w,label,cls){const n={_id:_nid++,x,y,w,label,cls};arr.push(n);return n}
 function avg(ns){return ns.reduce((a,n)=>a+n.y,0)/ns.length}
 </script></body></html>
