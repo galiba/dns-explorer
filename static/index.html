@@ -39,9 +39,10 @@ tr:hover td{background:#0e1626}
 .gn.host{fill:#0f1c14;stroke:var(--grn)}
 .gn.ip{fill:#0e1830;stroke:var(--acc)}
 .gn.int{fill:#241a08;stroke:#ffb454}
+.gn.rev{fill:#1a1226;stroke:#a678d6}
 .gn.val{fill:#151515;stroke:#7a6a3b}
 .gt{font:11px ui-monospace,Menlo,monospace;fill:var(--txt)}
-.gt.domain{fill:#e0a0a0}.gt.host{fill:var(--grn)}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.type{fill:#aab8cc}
+.gt.domain{fill:#e0a0a0}.gt.host{fill:var(--grn)}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.rev{fill:#c8a6ec}.gt.type{fill:#aab8cc}
 #graph g[data-fk]{cursor:pointer}
 #graph g[data-fk]:hover .gn{stroke-width:2.5;filter:brightness(1.4)}
 #filter{display:none;align-items:center;gap:10px;padding:10px 28px;font-size:12px;color:var(--mut)}
@@ -168,7 +169,7 @@ $('graph').addEventListener('click',e=>{
 function clip(s,w){const max=Math.floor((w-14)/7);return s.length>max?s.slice(0,max-1)+'…':s}
 function renderGraph(d){
   const rows=d.rows; if(!rows.length){$('graph').textContent='no records';return}
-  const rowH=26, colX=[16,250,340,660], colW=[150,60,300,260], NH=20;
+  const rowH=26, colX=[16,250,340,660,950], colW=[150,60,300,260,260], NH=20;
   const types=[...new Set(rows.map(r=>r.type))];
   let leaf=0; const nodes=[], edges=[], typeNodes=[];
   for(const t of types){
@@ -182,7 +183,12 @@ function renderGraph(d){
         const y=leaf*rowH+30; leaf++;
         const isip=t==='A'||t==='AAAA';
         const cls=isip?(vr.scope==='internal'?'int':'ip'):'val';
-        valNodes.push(add(nodes,colX[3],y,colW[3],vr.value,cls));
+        const vn=add(nodes,colX[3],y,colW[3],vr.value,cls);
+        valNodes.push(vn);
+        if(isip && vr.reverse){                       // reverse DNS / proxy node
+          const rn=add(nodes,colX[4],y,colW[4],vr.reverse,'rev');
+          edges.push([vn,rn]);
+        }
       }
       const hn=add(nodes,colX[2],avg(valNodes),colW[2],h,'host');
       hostNodes.push(hn); valNodes.forEach(v=>edges.push([hn,v]));
@@ -192,18 +198,18 @@ function renderGraph(d){
   }
   const dn=add(nodes,colX[0],avg(typeNodes),colW[0],d.domain,'domain');
   typeNodes.forEach(t=>edges.push([dn,t]));
-  const H=leaf*rowH+50, W=colX[3]+colW[3]+30;
+  const H=leaf*rowH+50, W=colX[4]+colW[4]+30;
   let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="monospace">`+
     `<style>.gedge{fill:none;stroke:#2a3a52}.gn{stroke-width:1.5}`+
     `.gn.domain{fill:#2a1616;stroke:#7a3b3b}.gn.type{fill:#141c2b;stroke:#5a6b86}`+
-    `.gn.host{fill:#0f1c14;stroke:#3ddc84}.gn.ip{fill:#0e1830;stroke:#4f9cf9}.gn.int{fill:#241a08;stroke:#ffb454}.gn.val{fill:#151515;stroke:#7a6a3b}`+
-    `.gt{font:11px monospace;fill:#c9d4e3}.gt.domain{fill:#e0a0a0}.gt.host{fill:#3ddc84}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.type{fill:#aab8cc}</style>`+
+    `.gn.host{fill:#0f1c14;stroke:#3ddc84}.gn.ip{fill:#0e1830;stroke:#4f9cf9}.gn.int{fill:#241a08;stroke:#ffb454}.gn.rev{fill:#1a1226;stroke:#a678d6}.gn.val{fill:#151515;stroke:#7a6a3b}`+
+    `.gt{font:11px monospace;fill:#c9d4e3}.gt.domain{fill:#e0a0a0}.gt.host{fill:#3ddc84}.gt.ip{fill:#9fc4ff}.gt.int{fill:#ffb454}.gt.rev{fill:#c8a6ec}.gt.type{fill:#aab8cc}</style>`+
     `<rect width="${W}" height="${H}" fill="#0a0e17"/>`;
   for(const[p,c] of edges){
     const x1=p.x+p.w,y1=p.y+NH/2,x2=c.x,y2=c.y+NH/2,mx=(x1+x2)/2;
     s+=`<path class="gedge" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`;
   }
-  const fk={domain:'domain',type:'type',host:'host',ip:'value',int:'value',val:'value'};
+  const fk={domain:'domain',type:'type',host:'host',ip:'value',int:'value',val:'value',rev:'reverse'};
   for(const n of nodes){
     s+=`<g data-fk="${fk[n.cls]}" data-fv="${esc(n.label).replace(/"/g,'&quot;')}"><title>${esc(n.label)} — click to filter</title>`+
       `<rect class="gn ${n.cls}" x="${n.x}" y="${n.y}" width="${n.w}" height="${NH}" rx="4"/>`+

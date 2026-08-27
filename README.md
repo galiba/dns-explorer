@@ -20,7 +20,9 @@ wordlist brute-force (which wildcard DNS defeats anyway).
    - **HackerTarget** (`api.hackertarget.com`, DNS host dataset)
 
 Every A/AAAA host is enriched with reverse DNS (PTR), ASN / netblock owner
-(Team Cymru, no API key), and optional HTTP/HTTPS `Server` banners. A **Source**
+(Team Cymru, no API key), and optional HTTP/HTTPS `Server` banners. The graph
+extends each IP to its reverse-DNS node, which often reveals the CDN /
+reverse proxy fronting it (e.g. `*.cloudfront.net`, `*.1e100.net`). A **Source**
 column tags each row (AXFR / apex / passive). Wildcard DNS is auto-detected and
 flagged so bogus resolutions are obvious. One-click **.xlsx export**.
 
