@@ -101,37 +101,41 @@ $('f').addEventListener('submit',async e=>{
   const body={domain:$('domain').value,resolver:$('resolver').value||null,grab_http:$('grab').checked,passive:$('passive').checked};
   try{
     const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    const d=await r.json();
-    if(!r.ok||d.error){throw new Error(d.error||'scan failed')}
+    if(!r.ok||!r.body) throw new Error('scan failed ('+r.status+')');
+    // read the Server-Sent-Events stream: {stage:"…"} updates, {result:{…}} finishes
+    const reader=r.body.getReader(), dec=new TextDecoder(); let buf='', d=null;
+    while(true){
+      const {done,value}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      let i;
+      while((i=buf.indexOf('\n\n'))>=0){
+        const line=buf.slice(0,i).replace(/^data:\s?/,''); buf=buf.slice(i+2);
+        if(!line) continue;
+        const msg=JSON.parse(line);
+        if(msg.stage!==undefined) ovStep(msg.stage);
+        else if(msg.result!==undefined) d=msg.result;
+      }
+    }
+    if(!d||d.error) throw new Error(d&&d.error||'scan failed');
     last=d;render(d);
   }catch(err){$('err').textContent='⚠ '+err.message}
   finally{ovStop();$('go').disabled=false}
 });
-// resolving overlay: narrate the real pipeline stages while the request is in flight
-const OV_STEPS=[
-  "Querying the nameservers for the base records — A, AAAA, MX, NS, TXT, SOA.",
-  "Attempting a DNS zone transfer (AXFR) to dump the full zone from the nameservers.",
-  "Checking whether the domain uses wildcard DNS, so bogus names get flagged.",
-  "Searching certificate transparency logs — crt.sh, Cert Spotter, CertKit, HackerTarget.",
-  "Resolving every discovered hostname to its IP address across the resolvers.",
-  "Looking up reverse DNS (PTR) and the ASN / netblock owner for each IP.",
-  "Grabbing HTTP and HTTPS server banners to fingerprint what's running.",
-  "Flagging internal vs public IPs and assembling the results and graph.",
-];
-let ovTimer=null, ovI=0;
+// resolving overlay driven by live server stages
+let ovCount=0;
 function ovStart(dom){
-  $('ovDom').textContent=dom; ovI=0; $('ovMsg').textContent=OV_STEPS[0];
-  $('ovDots').innerHTML=OV_STEPS.map((_,i)=>`<i class="${i===0?'on':''}"></i>`).join('');
+  $('ovDom').textContent=dom; ovCount=0;
+  $('ovMsg').textContent='Starting scan…';
+  $('ovDots').innerHTML='';
   $('overlay').classList.add('on');
-  clearInterval(ovTimer);
-  ovTimer=setInterval(()=>{
-    ovI=Math.min(ovI+1,OV_STEPS.length-1);
-    const el=$('ovMsg'); el.style.opacity=0;
-    setTimeout(()=>{el.textContent=OV_STEPS[ovI];el.style.opacity=1;},180);
-    [...$('ovDots').children].forEach((d,i)=>d.classList.toggle('on',i<=ovI));
-  },1700);
 }
-function ovStop(){ clearInterval(ovTimer); ovTimer=null; $('overlay').classList.remove('on'); }
+function ovStep(text){
+  ovCount++;
+  const el=$('ovMsg'); el.style.opacity=0;
+  setTimeout(()=>{el.textContent=text;el.style.opacity=1;},120);
+  $('ovDots').insertAdjacentHTML('beforeend','<i class="on"></i>');  // one dot per real stage
+}
+function ovStop(){ $('overlay').classList.remove('on'); }
 $('dl').addEventListener('click',async()=>{
   if(!last)return;
   const r=await fetch('/api/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(last)});

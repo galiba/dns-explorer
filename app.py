@@ -5,7 +5,7 @@ nameservers (or a user-supplied internal NS) to dump every record it holds. No
 subdomain wordlist — so wildcard DNS can't manufacture fake hosts. If AXFR is
 refused, fall back to direct record-type queries on the apex.
 """
-import io, ipaddress, secrets, time
+import io, ipaddress, secrets, time, json
 from concurrent.futures import ThreadPoolExecutor
 
 import dns.resolver, dns.reversename, dns.query, dns.zone, dns.rdatatype
@@ -208,19 +208,17 @@ def _crtsh(domain: str):
     return sorted(names), counts
 
 
-@app.post("/api/scan")
-def scan(q: Query):
+def _run_scan(q: Query):
+    """Generator that performs the scan and yields ('stage', msg) progress events
+    as each real step happens, then a final ('done', result_dict)."""
     domain = q.domain.strip().rstrip(".")
     if not domain:
-        return JSONResponse({"error": "domain required"}, status_code=400)
+        yield ("done", {"error": "domain required"}); return
     ns = q.resolver
     res = _resolver(ns)
-
-    # split-horizon: when an internal NS is given, also query a public resolver and
-    # union the answers, so a host's internal AND public A records both show up.
     views = [("internal", ns), ("external", "1.1.1.1 8.8.8.8")] if ns else [("", None)]
 
-    # apex records via direct queries (no wordlist), unioned across views
+    yield ("stage", f"Querying the nameservers for {domain}'s base records (A, AAAA, MX, NS, TXT, SOA)…")
     apex = {rtype: set() for rtype in APEX_TYPES}
     for _, vns in views:
         vr = _resolver(vns)
@@ -231,7 +229,7 @@ def scan(q: Query):
                 pass
     apex = {rtype: sorted(vals) for rtype, vals in apex.items()}
 
-    # wildcard detection: does a random label resolve?
+    yield ("stage", "Checking whether the domain uses wildcard DNS…")
     wildcard = False
     try:
         res.resolve(f"{secrets.token_hex(6)}.{domain}", "A")
@@ -239,7 +237,7 @@ def scan(q: Query):
     except Exception:
         pass
 
-    rows, seen = [], {}   # seen: (host,type,value) -> row, for de-dup + view merge
+    rows, seen = [], {}
 
     def push(r, source, view):
         k = (r["host"], r["type"], r["value"])
@@ -251,11 +249,10 @@ def scan(q: Query):
         r["source"] = source; r["view"] = view
         seen[k] = r; rows.append(r)
 
-    # nameservers to try AXFR against: user-supplied resolver(s) first, else the zone's NS
     ns_names = [x.rstrip(".") for x in apex.get("NS", [])]
-    targets: list[tuple[str, str]] = []            # (label, ip)
+    targets = []
     for t in _split(ns) or ns_names:
-        if any(c.isalpha() for c in t):            # NS hostname -> resolve to IPs
+        if any(c.isalpha() for c in t):
             try:
                 targets += [(t, str(a)) for a in _resolver(ns).resolve(t, "A")]
             except Exception:
@@ -263,6 +260,7 @@ def scan(q: Query):
         else:
             targets.append((t, t))
 
+    yield ("stage", f"Attempting a DNS zone transfer (AXFR) from {len(targets)} nameserver(s)…")
     axfr_from, method = [], ""
     for label, ip in targets:
         try:
@@ -274,11 +272,13 @@ def scan(q: Query):
 
     if rows:
         method = "AXFR zone transfer from " + ", ".join(sorted(set(axfr_from)))
+        yield ("stage", f"Zone transfer succeeded — parsed {len(rows)} records from the zone.")
     else:
         method = "AXFR refused — direct apex record queries only"
+        yield ("stage", "Zone transfer refused — resolving the apex records directly…")
         for rtype in APEX_TYPES:
             if rtype in ("A", "AAAA", "CNAME"):
-                continue                            # resolved per-view below
+                continue
             for v in apex.get(rtype, []):
                 push({"host": domain, "type": rtype, "value": v,
                       "reverse": "", "owner": "", "http": ""}, "apex", "")
@@ -286,12 +286,13 @@ def scan(q: Query):
             for r in _resolve_host(domain, vns):
                 push(r, "apex", label)
 
-    # passive discovery (CT logs), each candidate resolved across all views
     passive_names, passive_sources = [], {}
     if q.passive:
+        yield ("stage", "Searching certificate transparency logs (crt.sh, Cert Spotter, CertKit, HackerTarget)…")
         all_names, passive_sources = _crtsh(domain)
         cands = [n for n in all_names if n not in {r["host"] for r in rows}][:400]
         passive_names = cands
+        yield ("stage", f"Found {len(cands)} candidate hostnames — resolving each to its IP address…")
         jobs = [(h, label, vns) for h in cands for label, vns in views]
         with ThreadPoolExecutor(max_workers=20) as ex:
             results = list(ex.map(lambda j: (j[1], _resolve_host(j[0], j[2])), jobs))
@@ -299,11 +300,13 @@ def scan(q: Query):
             for r in res_rows:
                 push(r, "passive", label)
 
-    # enrich A/AAAA rows (reverse DNS, ASN, banners) concurrently
     a_rows = [r for r in rows if r["type"] in ("A", "AAAA")]
+    verb = "Reverse DNS, ASN owner and HTTP banners" if q.grab_http else "Reverse DNS and ASN owner"
+    yield ("stage", f"{verb} for {len(a_rows)} IP address(es)…")
     with ThreadPoolExecutor(max_workers=20) as ex:
         list(ex.map(lambda r: _enrich(r, ns, q.grab_http), a_rows))
 
+    yield ("stage", "Flagging internal vs public IPs and assembling the results…")
     if len(views) > 1:
         method += " · combined internal+external resolver"
     if q.passive:
@@ -311,9 +314,22 @@ def scan(q: Query):
     rows.sort(key=lambda r: (r["host"], r["type"]))
     counts = {"internal": sum(r.get("scope") == "internal" for r in rows),
               "public": sum(r.get("scope") == "public" for r in rows)}
-    return {"domain": domain, "resolver": ns or "system", "method": method,
-            "wildcard": wildcard, "counts": counts, "passive_sources": passive_sources,
-            "apex": apex, "rows": rows}
+    yield ("done", {"domain": domain, "resolver": ns or "system", "method": method,
+                    "wildcard": wildcard, "counts": counts, "passive_sources": passive_sources,
+                    "apex": apex, "rows": rows})
+
+
+@app.post("/api/scan")
+def scan(q: Query):
+    def gen():
+        try:
+            for kind, payload in _run_scan(q):
+                key = "stage" if kind == "stage" else "result"
+                yield f"data: {json.dumps({key: payload})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'result': {'error': str(e)}})}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/export")
