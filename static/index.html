@@ -64,7 +64,7 @@ tr:hover td{background:#0e1626}
 <div id="spin" class="spin">resolving…</div>
 <div id="err" class="err"></div>
 <div class="wrap"><table id="t" style="display:none">
-<thead><tr><th>Host</th><th>Type</th><th>Value / IP</th><th>Scope</th><th>Reverse DNS</th><th>Netblock Owner</th><th>HTTP Services</th><th>Source</th></tr></thead>
+<thead><tr><th>Host</th><th>Type</th><th>Value / IP</th><th>Scope</th><th>View</th><th>Reverse DNS</th><th>Netblock Owner</th><th>HTTP Services</th><th>Source</th></tr></thead>
 <tbody></tbody></table></div>
 <div id="graph"></div>
 <script>
@@ -139,7 +139,7 @@ function fillTable(){
     const val=esc(row.value); const isip=row.type==='A'||row.type==='AAAA';
     tr.innerHTML=`<td class="host">${esc(row.host)}</td><td class="type">${esc(row.type)}</td>`+
       `<td class="${isip?'ip':''}">${val}</td><td class="${esc(row.scope)}">${esc(row.scope)}</td>`+
-      `<td>${esc(row.reverse)}</td>`+
+      `<td class="type">${esc(row.view)}</td><td>${esc(row.reverse)}</td>`+
       `<td>${esc(row.owner).replace(/\n/g,'<br>')}</td><td>${esc(row.http).replace(/\n/g,'<br>')}</td>`+
       `<td class="type">${esc(row.source)}</td>`;
     tb.appendChild(tr);

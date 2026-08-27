@@ -34,11 +34,17 @@ Open http://localhost:8000
 Binding to `127.0.0.1` keeps the server on loopback only (not exposed to your
 network, and avoids the macOS firewall prompt for the listening socket).
 
-## Internal nameservers
+## Internal nameservers & split-horizon
 Put your internal DNS server IP(s) in the **Nameserver** field
-(e.g. `10.0.0.53`, space/comma separated for several). It's used both as the
-AXFR target and as the resolver. Leave blank to use the system resolver. ASN
-lookups skip private IPs automatically.
+(e.g. `10.0.0.53`, space/comma separated for several). It's used as the AXFR
+target and resolver. Leave blank to use the system resolver.
+
+When an internal NS is set, the tool **also queries a public resolver**
+(1.1.1.1 / 8.8.8.8) and unions the answers — so a split-horizon host shows
+*both* its internal record and its public record. The **View** column tags each
+row `internal`, `external`, or `both`, and **Scope** flags each IP
+`internal` (RFC1918/loopback/ULA) or `public`. ASN/PTR lookups route
+internal IPs through the internal NS and public IPs through system DNS.
 
 ## Notes
 - AXFR against most public domains is refused (by design) — it shines against

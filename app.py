@@ -92,7 +92,9 @@ def _enrich(row: dict, ns: str | None, grab_http: bool) -> dict:
         row["scope"] = "internal" if ipaddress.ip_address(ip).is_private else "public"
     except Exception:
         row["scope"] = ""
-    row["reverse"] = _ptr(ip, ns)
+    # reverse-resolve internal IPs via the internal NS, public IPs via system DNS
+    ptr_ns = ns if row["scope"] == "internal" else None
+    row["reverse"] = _ptr(ip, ptr_ns)
     row["owner"] = _asn(ip)
     row["http"] = _banner(row["host"]) if grab_http else ""
     return row
@@ -108,7 +110,7 @@ def _axfr(domain: str, ns_ip: str) -> list[dict]:
             rtype = dns.rdatatype.to_text(rds.rdtype)
             for rd in rds:
                 rows.append({"host": fqdn, "type": rtype, "value": rd.to_text(),
-                             "reverse": "", "owner": "", "http": "", "source": "AXFR"})
+                             "reverse": "", "owner": "", "http": "", "source": "AXFR", "view": ""})
     return rows
 
 
@@ -121,7 +123,7 @@ def _resolve_host(host: str, ns: str | None) -> list[dict]:
             for rec in r.resolve(host, rtype):
                 val = rec.address if rtype != "CNAME" else str(rec.target).rstrip(".")
                 out.append({"host": host, "type": rtype, "value": val,
-                            "reverse": "", "owner": "", "http": "", "source": "passive"})
+                            "reverse": "", "owner": "", "http": ""})
         except Exception:
             pass
     return out
@@ -202,13 +204,20 @@ def scan(q: Query):
     ns = q.resolver
     res = _resolver(ns)
 
-    # apex records via direct queries (no wordlist)
-    apex = {}
-    for rtype in APEX_TYPES:
-        try:
-            apex[rtype] = [r.to_text() for r in res.resolve(domain, rtype)]
-        except Exception:
-            apex[rtype] = []
+    # split-horizon: when an internal NS is given, also query a public resolver and
+    # union the answers, so a host's internal AND public A records both show up.
+    views = [("internal", ns), ("external", "1.1.1.1 8.8.8.8")] if ns else [("", None)]
+
+    # apex records via direct queries (no wordlist), unioned across views
+    apex = {rtype: set() for rtype in APEX_TYPES}
+    for _, vns in views:
+        vr = _resolver(vns)
+        for rtype in APEX_TYPES:
+            try:
+                apex[rtype] |= {r.to_text() for r in vr.resolve(domain, rtype)}
+            except Exception:
+                pass
+    apex = {rtype: sorted(vals) for rtype, vals in apex.items()}
 
     # wildcard detection: does a random label resolve?
     wildcard = False
@@ -217,6 +226,18 @@ def scan(q: Query):
         wildcard = True
     except Exception:
         pass
+
+    rows, seen = [], {}   # seen: (host,type,value) -> row, for de-dup + view merge
+
+    def push(r, source, view):
+        k = (r["host"], r["type"], r["value"])
+        ex = seen.get(k)
+        if ex is not None:
+            if view and ex["view"] != view:
+                ex["view"] = "both" if ex["view"] else view
+            return
+        r["source"] = source; r["view"] = view
+        seen[k] = r; rows.append(r)
 
     # nameservers to try AXFR against: user-supplied resolver(s) first, else the zone's NS
     ns_names = [x.rstrip(".") for x in apex.get("NS", [])]
@@ -230,14 +251,11 @@ def scan(q: Query):
         else:
             targets.append((t, t))
 
-    rows, axfr_from, method = [], [], ""
-    seen = set()
+    axfr_from, method = [], ""
     for label, ip in targets:
         try:
             for r in _axfr(domain, ip):
-                k = (r["host"], r["type"], r["value"])
-                if k not in seen:
-                    seen.add(k); rows.append(r)
+                push(r, "AXFR", r.get("view", ""))
             axfr_from.append(label)
         except Exception:
             continue
@@ -247,28 +265,34 @@ def scan(q: Query):
     else:
         method = "AXFR refused — direct apex record queries only"
         for rtype in APEX_TYPES:
+            if rtype in ("A", "AAAA", "CNAME"):
+                continue                            # resolved per-view below
             for v in apex.get(rtype, []):
-                rows.append({"host": domain, "type": rtype, "value": v,
-                             "reverse": "", "owner": "", "http": "", "source": "apex"})
+                push({"host": domain, "type": rtype, "value": v,
+                      "reverse": "", "owner": "", "http": ""}, "apex", "")
+        for label, vns in views:
+            for r in _resolve_host(domain, vns):
+                push(r, "apex", label)
 
-    # passive discovery via crt.sh certificate-transparency logs
+    # passive discovery (CT logs), each candidate resolved across all views
     passive_names = []
     if q.passive:
-        seen_hosts = {r["host"] for r in rows}
-        cands = [n for n in _crtsh(domain) if n not in seen_hosts][:400]
+        cands = [n for n in _crtsh(domain) if n not in {r["host"] for r in rows}][:400]
         passive_names = cands
+        jobs = [(h, label, vns) for h in cands for label, vns in views]
         with ThreadPoolExecutor(max_workers=20) as ex:
-            for res_rows in ex.map(lambda h: _resolve_host(h, ns), cands):
-                for r in res_rows:
-                    k = (r["host"], r["type"], r["value"])
-                    if k not in seen:
-                        seen.add(k); rows.append(r)
+            results = list(ex.map(lambda j: (j[1], _resolve_host(j[0], j[2])), jobs))
+        for label, res_rows in results:
+            for r in res_rows:
+                push(r, "passive", label)
 
     # enrich A/AAAA rows (reverse DNS, ASN, banners) concurrently
     a_rows = [r for r in rows if r["type"] in ("A", "AAAA")]
     with ThreadPoolExecutor(max_workers=20) as ex:
         list(ex.map(lambda r: _enrich(r, ns, q.grab_http), a_rows))
 
+    if len(views) > 1:
+        method += " · combined internal+external resolver"
     if q.passive:
         method += f" + passive CT/DNS ({len(passive_names)} names)"
     rows.sort(key=lambda r: (r["host"], r["type"]))
@@ -297,13 +321,13 @@ def export(payload: dict):
     s.column_dimensions["B"].width = 12; s.column_dimensions["C"].width = 70
 
     d = wb.create_sheet("DNS Records")
-    cols = ["Host", "Type", "Value / IP", "Scope", "Reverse DNS", "Netblock Owner", "HTTP Services", "Source"]
+    cols = ["Host", "Type", "Value / IP", "Scope", "View", "Reverse DNS", "Netblock Owner", "HTTP Services", "Source"]
     for c, name in enumerate(cols, 1):
         cell = d.cell(1, c, name); cell.font = hdr_font; cell.fill = hdr_fill
     for i, row in enumerate(rows, 2):
-        for c, key in enumerate(("host", "type", "value", "scope", "reverse", "owner", "http", "source"), 1):
+        for c, key in enumerate(("host", "type", "value", "scope", "view", "reverse", "owner", "http", "source"), 1):
             d.cell(i, c, row.get(key))
-    for col, w in zip("ABCDEFGH", (34, 8, 40, 10, 30, 44, 40, 10)):
+    for col, w in zip("ABCDEFGHI", (34, 8, 40, 10, 9, 30, 44, 40, 10)):
         d.column_dimensions[col].width = w
     wrap = Alignment(wrap_text=True, vertical="top")
     for r_ in d.iter_rows(min_row=2):
