@@ -282,7 +282,15 @@ function renderGraph(d){
   for(const[p,c] of edges){ (inc[c._id] ||= new Set()).add(p._id); }
   for(const n of nodes){ n.count=inc[n._id]?inc[n._id].size:0; }
 
-  const H=leaf*rowH+50, W=colX[4]+colW[4]+30;
+  // coalesced nodes sit at the average y of their hosts, so distinct ones can
+  // collide — push them apart vertically (1D label de-overlap) per column
+  function decollide(x){
+    const col=nodes.filter(n=>n.x===x).sort((a,b)=>a.y-b.y), gap=NH+8;
+    for(let i=1;i<col.length;i++) if(col[i].y<col[i-1].y+gap) col[i].y=col[i-1].y+gap;
+  }
+  decollide(colX[3]); decollide(colX[4]);
+  const maxY=nodes.reduce((m,n)=>Math.max(m,n.y),0);
+  const H=maxY+NH+30, W=colX[4]+colW[4]+30;
   let s=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" font-family="monospace">`+
     `<style>.gedge{fill:none;stroke:#2a3a52}.gn{stroke-width:1.5}`+
     `.gn.domain{fill:#2a1616;stroke:#7a3b3b}.gn.type{fill:#141c2b;stroke:#5a6b86}`+
